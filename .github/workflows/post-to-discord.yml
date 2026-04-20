@@ -1,0 +1,61 @@
+name: Post AI Releases to Discord
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "ai-releases-*.md"
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get changed release file
+        id: file
+        run: |
+          FILE=$(git diff --name-only HEAD~1 HEAD | grep '^ai-releases-.*\.md$' | head -1)
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Split and post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          FILE="${{ steps.file.outputs.path }}"
+          if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+            echo "No release file found, skipping."
+            exit 0
+          fi
+
+          CONTENT=$(cat "$FILE")
+
+          # Split at the Business & Infrastructure section boundary
+          PART1=$(echo "$CONTENT" | awk '/^---/{found++} found==1{exit} {print}')
+          PART2=$(echo "$CONTENT" | awk '/^### Business/{found=1} found{print}')
+
+          post_to_discord() {
+            local body="$1"
+            local attempt=0
+            local delays=(2 4 8 16)
+            while [ $attempt -le 4 ]; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$DISCORD_WEBHOOK_URL" \
+                -H "Content-Type: application/json" \
+                --data-binary "$(jq -n --arg c "$body" '{content: $c}')")
+              if [ "$STATUS" = "204" ]; then
+                echo "Posted (attempt $((attempt+1))): HTTP $STATUS"
+                return 0
+              fi
+              echo "Attempt $((attempt+1)) failed: HTTP $STATUS"
+              if [ $attempt -lt 4 ]; then
+                sleep "${delays[$attempt]}"
+              fi
+              attempt=$((attempt+1))
+            done
+            echo "All attempts failed."
+            return 1
+          }
+
+          post_to_discord "$PART1"
+          sleep 1
+          post_to_discord "$PART2"
